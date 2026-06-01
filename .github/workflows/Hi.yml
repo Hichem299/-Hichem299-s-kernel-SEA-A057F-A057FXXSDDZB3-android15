@@ -28,7 +28,7 @@ jobs:
           path: kernel_source
           fetch-depth: 1
           submodules: recursive
-          token: ${{ secrets.PAT_TOKEN }} # مطلوب لو الريبو private
+          token: ${{ secrets.PAT_TOKEN }}
 
       - name: Install build dependencies
         run: |
@@ -62,33 +62,33 @@ jobs:
             KDIR="common"
           fi
 
-          cat > "$KDIR/arch/arm64/configs/kvm_nvhe.fragment" <<'EOF'
-CONFIG_VIRTUALIZATION=y
-CONFIG_KVM=y
-CONFIG_KVM_ARM_HOST=y
-CONFIG_KVM_ARM_PMU=y
-CONFIG_KVM_ARM_PV_TIME=y
-CONFIG_KVM_ARM_VGIC=y
-CONFIG_KVM_ARM_VGIC_V3=y
-CONFIG_KVM_ARM_VGIC_V3_SYSREGS=y
-CONFIG_KVM_ARM_TIMER=y
-CONFIG_VHOST=y
-CONFIG_VHOST_NET=y
-CONFIG_VHOST_VSOCK=y
-CONFIG_VIRTIO=y
-CONFIG_VIRTIO_BLK=y
-CONFIG_VIRTIO_NET=y
-CONFIG_VIRTIO_CONSOLE=y
-CONFIG_VIRTIO_MMIO=y
-EOF
+          cat > "${KDIR}/arch/arm64/configs/kvm_nvhe.fragment" <<'EOF'
+          CONFIG_VIRTUALIZATION=y
+          CONFIG_KVM=y
+          CONFIG_KVM_ARM_HOST=y
+          CONFIG_KVM_ARM_PMU=y
+          CONFIG_KVM_ARM_PV_TIME=y
+          CONFIG_KVM_ARM_VGIC=y
+          CONFIG_KVM_ARM_VGIC_V3=y
+          CONFIG_KVM_ARM_VGIC_V3_SYSREGS=y
+          CONFIG_KVM_ARM_TIMER=y
+          CONFIG_VHOST=y
+          CONFIG_VHOST_NET=y
+          CONFIG_VHOST_VSOCK=y
+          CONFIG_VIRTIO=y
+          CONFIG_VIRTIO_BLK=y
+          CONFIG_VIRTIO_NET=y
+          CONFIG_VIRTIO_CONSOLE=y
+          CONFIG_VIRTIO_MMIO=y
+          EOF
 
-          if [ -x "$KDIR/scripts/kconfig/merge_config.sh" ]; then
-            "$KDIR/scripts/kconfig/merge_config.sh" -m \
-              "$KDIR/arch/arm64/configs/gki_defconfig" \
-              "$KDIR/arch/arm64/configs/kvm_nvhe.fragment"
+          if [ -x "${KDIR}/scripts/kconfig/merge_config.sh" ]; then
+            "${KDIR}/scripts/kconfig/merge_config.sh" -m \
+              "${KDIR}/arch/arm64/configs/gki_defconfig" \
+              "${KDIR}/arch/arm64/configs/kvm_nvhe.fragment"
           else
-            cat "$KDIR/arch/arm64/configs/kvm_nvhe.fragment" >> \
-              "$KDIR/arch/arm64/configs/gki_defconfig"
+            cat "${KDIR}/arch/arm64/configs/kvm_nvhe.fragment" >> \
+              "${KDIR}/arch/arm64/configs/gki_defconfig"
           fi
 
           echo "KVM fragment added successfully"
@@ -126,9 +126,9 @@ EOF
             -name "init_boot.img" -o \
             -name "*.ko" -o \
             -name "System.map" \
-          \) | while read file; do
-            echo "Copying: $file"
-            cp --parents "$file" artifacts/ 2>/dev/null || true
+          \) | while read -r file; do
+            echo "Copying: ${file}"
+            cp --parents "${file}" artifacts/ 2>/dev/null || true
           done
           cp build.log artifacts/ 2>/dev/null || true
           echo "KVM_MODE=${KVM_MODE}" > artifacts/build_info.txt
