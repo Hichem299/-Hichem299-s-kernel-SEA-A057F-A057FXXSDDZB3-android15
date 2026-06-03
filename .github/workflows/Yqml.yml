@@ -344,18 +344,6 @@ jobs:
 
           find out -type f \( \
             -name "Image" -o \
-            -name "Image.gz" -o \
-            -name "Image.gz-dtb" -o \
-            -name "boot.img" -o \
-            -name "vendor_boot.img" -o \
-            -name "dtb.img" -o \
-            -name "dtbo.img" -o \
-            -name "*.ko" -o \
-            -name "System.map" -o \
-            -name "modules.load" -o \
-            -name "modules.blocklist" -o \
-            -name ".config" -o \
-            -name "vmlinux" \
           \) -exec cp --parents {} artifacts/ \; 2>/dev/null || true
 
           find . -maxdepth 4 -type f -name "*.zip" -exec cp --parents {} artifacts/ \; 2>/dev/null || true
