@@ -1,0 +1,358 @@
+name: Build Samsung Galaxy A05s SM-A057F Kernel
+
+on:
+  workflow_dispatch:
+    inputs:
+      kp_target:
+        description: "Kernel target (e.g., m269_sec)"
+        required: false
+        default: "m269_sec"
+      build_variant:
+        description: "Build variant"
+        required: false
+        default: "user"
+  push:
+    branches:
+      - main
+      - master
+
+env:
+  CHIPSET_NAME: sm6225
+  BUILD_TARGET_INPUT: ${{ github.event.inputs.kp_target || 'm269_sec' }}
+  TARGET_BUILD_VARIANT: ${{ github.event.inputs.build_variant || 'user' }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          submodules: recursive
+
+      - name: Free some disk space
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo rm -rf /usr/local/lib/android || true
+          sudo rm -rf /opt/ghc || true
+          sudo docker system prune -af || true
+          df -h
+
+      - name: Install Ubuntu build dependencies
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            bc \
+            bison \
+            build-essential \
+            ccache \
+            clang \
+            curl \
+            device-tree-compiler \
+            dwarves \
+            file \
+            flex \
+            g++-aarch64-linux-gnu \
+            gcc-aarch64-linux-gnu \
+            git \
+            jq \
+            libdw-dev \
+            libelf-dev \
+            libncurses-dev \
+            libssl-dev \
+            lld \
+            llvm \
+            lz4 \
+            make \
+            meson \
+            ninja-build \
+            pahole \
+            python-is-python3 \
+            python3 \
+            python3-pip \
+            repo \
+            rsync \
+            unzip \
+            wget \
+            xz-utils \
+            zip \
+            zstd \
+            cpio \
+            ca-certificates
+
+      - name: Normalize repo permissions and detect source tree
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+          # Fix CRLF on shell/perl scripts if any
+          find . -type f \( -name "*.sh" -o -name "*.pl" \) -print0 | xargs -0 -r sed -i 's/\r$//'
+
+          # Make named scripts executable (.sh, .pl, .py)
+          find . -type f \( \
+            -name "*.sh" -o \
+            -name "*.pl" -o \
+            -name "*.py" \
+          \) -print0 | xargs -0 -r chmod 755
+
+          # Fix scripts without file extensions (remove-stale-files, bloat-o-meter, etc.)
+          find "${GITHUB_WORKSPACE}" -path "*/scripts/*" -maxdepth 8 -type f ! -name "*.*" -exec chmod 755 {} + 2>/dev/null || true
+
+          # Explicitly fix bpf_doc.py (Error 126 culprit)
+          chmod +x kernel_platform/common/scripts/bpf_doc.py 2>/dev/null || true
+          chmod +x kernel_platform/scripts/bpf_doc.py 2>/dev/null || true
+
+          # Debug: verify bpf_doc.py is executable
+          ls -l kernel_platform/common/scripts/bpf_doc.py 2>/dev/null || true
+          head -n 1 kernel_platform/common/scripts/bpf_doc.py 2>/dev/null || true
+
+          chmod +x build_kernel_GKI.sh || true
+
+          # Important kernel scripts that often break on GitHub Actions if permission bits are lost
+          [ -f "kernel_platform/common/scripts/cc-version.sh" ] && chmod 755 kernel_platform/common/scripts/cc-version.sh || true
+          [ -f "kernel_platform/scripts/cc-version.sh" ] && chmod 755 kernel_platform/scripts/cc-version.sh || true
+
+          [ -d "kernel_platform/common/scripts/kconfig" ] && \
+            find kernel_platform/common/scripts/kconfig -type f -name "*.sh" -exec chmod 755 {} + || true
+
+          [ -d "kernel_platform/scripts/kconfig" ] && \
+            find kernel_platform/scripts/kconfig -type f -name "*.sh" -exec chmod 755 {} + || true
+
+          # Fix possibly wrong Samsung path if present
+          if [ -f "build_kernel_GKI.sh" ]; then
+            sed -i \
+              's#./kernel_platform/build/android/prepare_vendor.sh#./kernel_platform/build/kernel/android/prepare_vendor.sh#g' \
+              build_kernel_GKI.sh || true
+          fi
+
+          # Detect kernel source dir
+          if [ -f "$GITHUB_WORKSPACE/kernel_platform/common/Makefile" ]; then
+            echo "KERNEL_SRC=$GITHUB_WORKSPACE/kernel_platform/common" >> "$GITHUB_ENV"
+            echo "KERNEL_TOP=$GITHUB_WORKSPACE/kernel_platform" >> "$GITHUB_ENV"
+          elif [ -f "$GITHUB_WORKSPACE/kernel_platform/Makefile" ]; then
+            echo "KERNEL_SRC=$GITHUB_WORKSPACE/kernel_platform" >> "$GITHUB_ENV"
+            echo "KERNEL_TOP=$GITHUB_WORKSPACE/kernel_platform" >> "$GITHUB_ENV"
+          else
+            FOUND_MAKEFILE="$(find "$GITHUB_WORKSPACE" -type f -name Makefile | grep -E '/(kernel_platform|common)/Makefile$' | head -n 1 || true)"
+            if [ -z "$FOUND_MAKEFILE" ]; then
+              echo "Kernel source tree not found"
+              exit 1
+            fi
+            FOUND_DIR="$(dirname "$FOUND_MAKEFILE")"
+            echo "KERNEL_SRC=$FOUND_DIR" >> "$GITHUB_ENV"
+            echo "KERNEL_TOP=$(dirname "$FOUND_DIR")" >> "$GITHUB_ENV"
+          fi
+
+          # Prefer repo-bundled clang if available
+          REPO_CLANG=""
+          while IFS= read -r -d '' c; do
+            REPO_CLANG="$(dirname "$c")"
+            break
+          done < <(find "$GITHUB_WORKSPACE" -type f -path "*/bin/clang" -print0 2>/dev/null | sort -z)
+
+          if [ -n "$REPO_CLANG" ]; then
+            echo "Using bundled clang from: $REPO_CLANG"
+            echo "$REPO_CLANG" >> "$GITHUB_PATH"
+            echo "CLANG_BIN=$REPO_CLANG" >> "$GITHUB_ENV"
+          else
+            echo "Using system clang from runner"
+          fi
+
+      - name: Show selected config
+        shell: bash
+        run: |
+          set -euxo pipefail
+          echo "BUILD_TARGET_INPUT=${BUILD_TARGET_INPUT}"
+          echo "TARGET_BUILD_VARIANT=${TARGET_BUILD_VARIANT}"
+          echo "CHIPSET_NAME=${CHIPSET_NAME}"
+          echo "KERNEL_SRC=${KERNEL_SRC}"
+          command -v clang
+          clang --version | head -n 1 || true
+          command -v ld.lld || true
+          ld.lld --version | head -n 1 || true
+
+      - name: Build kernel
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          MODEL="$(echo "${BUILD_TARGET_INPUT}" | cut -d'_' -f1)"
+          REGION="$(echo "${BUILD_TARGET_INPUT}" | cut -d'_' -f2)"
+          CARRIER="$(echo "${BUILD_TARGET_INPUT}" | cut -d'_' -f3)"
+
+          [ -n "${MODEL}" ] || MODEL="m269"
+          [ -n "${REGION}" ] || REGION="sec"
+          [ -n "${CARRIER}" ] || CARRIER="xx"
+
+          export MODEL
+          export PROJECT_NAME="${MODEL}"
+          export REGION
+          export CARRIER
+          export TARGET_BUILD_VARIANT="${TARGET_BUILD_VARIANT}"
+
+          export ANDROID_BUILD_TOP="${GITHUB_WORKSPACE}"
+          export TARGET_PRODUCT="gki"
+          export TARGET_BOARD_PLATFORM="gki"
+
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export LLVM=1
+          export LLVM_IAS=1
+          export CROSS_COMPILE=aarch64-linux-gnu-
+
+          export CC=clang
+          export LD=ld.lld
+          export AR=llvm-ar
+          export NM=llvm-nm
+          export OBJCOPY=llvm-objcopy
+          export OBJDUMP=llvm-objdump
+          export READELF=llvm-readelf
+          export STRIP=llvm-strip
+
+          export PRODUCT_OUT="${ANDROID_BUILD_TOP}/out/target/product/${TARGET_PRODUCT}"
+          export ANDROID_PRODUCT_OUT="${PRODUCT_OUT}"
+          export OUT_DIR="${ANDROID_BUILD_TOP}/out/msm-${CHIPSET_NAME}-${TARGET_PRODUCT}"
+          export DIST_DIR="${OUT_DIR}/dist"
+
+          mkdir -p "${PRODUCT_OUT}" "${OUT_DIR}" "${DIST_DIR}"
+
+          cd "${KERNEL_SRC}"
+
+          if ! command -v clang >/dev/null 2>&1; then
+            echo "clang not found in PATH"
+            exit 1
+          fi
+
+          chmod +x scripts/cc-version.sh || true
+          chmod +x scripts/kconfig/merge_config.sh || true
+
+          # Fix any remaining scripts without extensions under current tree
+          find scripts -maxdepth 3 -type f ! -name "*.*" -exec chmod 755 {} + 2>/dev/null || true
+
+          # ── Step 1: load base defconfig ──────────────────────────────────────
+          make O="${OUT_DIR}" gki_defconfig
+
+          # ── Step 2: inject all configs directly into .config via sed ─────────
+          # Method: remove old line if exists, then append correct value.
+          # This is guaranteed to work regardless of scripts/config availability.
+
+          inject_config() {
+            local cfg="$1"   # e.g. CONFIG_LTO_CLANG_THIN
+            local val="$2"   # e.g. y  or  n  or  m  or  "some string"
+            local file="${OUT_DIR}/.config"
+
+            # Remove any existing line for this config (set, unset, or commented)
+            sed -i "/^${cfg}[= ]/d;/^# ${cfg} is not set/d" "${file}"
+
+            if [ "${val}" = "n" ]; then
+              echo "# ${cfg} is not set" >> "${file}"
+            else
+              echo "${cfg}=${val}" >> "${file}"
+            fi
+          }
+
+          # ── LTO: disable full, enable thin ───────────────────────────────────
+          inject_config CONFIG_LTO_NONE            n
+          inject_config CONFIG_LTO_CLANG_FULL      n
+          inject_config CONFIG_LTO_CLANG_THIN      y
+
+          # ── KVM / Virtualization ─────────────────────────────────────────────
+          inject_config CONFIG_VIRTUALIZATION      y
+          inject_config CONFIG_KVM                 y
+          inject_config CONFIG_KVM_ARM_HOST        y
+          inject_config CONFIG_KVM_ARM_PMU         y
+          inject_config CONFIG_KVM_ARM_VGIC        y
+          inject_config CONFIG_KVM_ARM_VGIC_V3     y
+          inject_config CONFIG_KVM_ARM_TIMER       y
+          inject_config CONFIG_ARM64_VHE           y
+
+          # ── Virtio ───────────────────────────────────────────────────────────
+          inject_config CONFIG_VIRTIO              y
+          inject_config CONFIG_VIRTIO_BLK          y
+          inject_config CONFIG_VIRTIO_NET          y
+          inject_config CONFIG_VIRTIO_CONSOLE      y
+          inject_config CONFIG_VIRTIO_INPUT        y
+          inject_config CONFIG_VIRTIO_MMIO         y
+          inject_config CONFIG_VHOST               y
+          inject_config CONFIG_VHOST_NET           y
+
+          # ── Gunyah / QCOM ────────────────────────────────────────────────────
+          inject_config CONFIG_GUNYAH              y
+          inject_config CONFIG_GUNYAH_PLATFORM     y
+          inject_config CONFIG_GUNYAH_RESOURCE_MANAGER y
+          inject_config CONFIG_QCOM_SCM            y
+          inject_config CONFIG_SYS_HYPERVISOR      y
+
+          # ── CMDLINE: extend (safe for Samsung — does not override bootloader) ─
+          inject_config CONFIG_CMDLINE_EXTEND      y
+          inject_config CONFIG_CMDLINE_FORCE       n
+          # Append kvm-arm.mode=nvhe to kernel cmdline
+          # Remove old CMDLINE line first, then add new one
+          sed -i '/^CONFIG_CMDLINE=/d' "${OUT_DIR}/.config"
+          echo 'CONFIG_CMDLINE="kvm-arm.mode=nvhe"' >> "${OUT_DIR}/.config"
+
+          # ── Step 3: resolve dependencies / conflicts ──────────────────────────
+          make O="${OUT_DIR}" olddefconfig
+
+          # ── Step 4: verify ───────────────────────────────────────────────────
+          echo "=== LTO ==="
+          grep -E "^(CONFIG_LTO|# CONFIG_LTO)" "${OUT_DIR}/.config" || true
+          echo "=== KVM ==="
+          grep -E "^(CONFIG_KVM|CONFIG_VIRTUALIZATION|# CONFIG_KVM)" "${OUT_DIR}/.config" || true
+          echo "=== CMDLINE ==="
+          grep -E "^CONFIG_CMDLINE" "${OUT_DIR}/.config" || true
+
+          # ── Step 5: build ─────────────────────────────────────────────────────
+          make O="${OUT_DIR}" -j"$(nproc)" Image modules
+
+          test -f "${OUT_DIR}/arch/arm64/boot/Image"
+          cp "${OUT_DIR}/arch/arm64/boot/Image" "${DIST_DIR}/Image"
+
+          if [ -f "${OUT_DIR}/arch/arm64/boot/Image.gz" ]; then
+            cp "${OUT_DIR}/arch/arm64/boot/Image.gz" "${DIST_DIR}/Image.gz"
+          fi
+
+          PREPARE_VENDOR="$(find "${ANDROID_BUILD_TOP}" -type f -name prepare_vendor.sh | head -n 1 || true)"
+          if [ -n "${PREPARE_VENDOR}" ]; then
+            chmod +x "${PREPARE_VENDOR}" || true
+            (
+              cd "$(dirname "${PREPARE_VENDOR}")"
+              bash "$(basename "${PREPARE_VENDOR}")" sec "${TARGET_PRODUCT}"
+            ) || echo "prepare_vendor.sh failed after kernel build; keeping built artifacts."
+          fi
+
+      - name: Collect artifacts
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          mkdir -p artifacts
+
+          find out -type f \( \
+            -name "Image" -o \
+            -name "Image.gz" -o \
+            -name "Image.gz-dtb" \
+          \) -exec cp --parents {} artifacts/ \; 2>/dev/null || true
+
+          find . -maxdepth 4 -type f -name "*.zip" -exec cp --parents {} artifacts/ \; 2>/dev/null || true
+
+          echo "Collected files:"
+          find artifacts -type f | sort || true
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: A05s-A057F-kernel-${{ github.run_number }}
+          path: artifacts/**
+          if-no-files-found: warn
+          retention-days: 7
+          compression-level: 0
