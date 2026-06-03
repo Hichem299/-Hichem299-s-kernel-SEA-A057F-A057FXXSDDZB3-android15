@@ -1,4 +1,4 @@
-Name: Build Samsung Galaxy A05s SM-A057F Kernel
+name: Build Samsung Galaxy A05s SM-A057F Kernel
 
 on:
   workflow_dispatch:
