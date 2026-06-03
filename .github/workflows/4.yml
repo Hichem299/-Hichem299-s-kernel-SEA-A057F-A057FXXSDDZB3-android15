@@ -125,8 +125,9 @@ jobs:
           mkdir -p "${ANDROID_PRODUCT_OUT}"
           mkdir -p "${OUT_DIR}"
 
-          # إصلاح الخطأ: إعطاء صلاحيات التشغيل لجميع ملفات السكربت (.sh) لتفادي Permission denied
-          chmod -R +x kernel_platform/build/
+          
+          إصلاح الخطأ: إعطاء صلاحيات التشغيل لجميع ملفات السكربت (.sh) لتفادي Permission denied
+           chmod -R +x kernel_platform/build/
 
           ./kernel_platform/build/kernel/android/prepare_vendor.sh "${KP_TARGET}" "${KP_VARIANT}" "${OUT_DIR}"
 
