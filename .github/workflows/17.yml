@@ -192,7 +192,7 @@ jobs:
           CONFIG_QCOM_SCM=y
           CONFIG_SYS_HYPERVISOR=y
           EOF
-      - name: Normalize repo permissions and detect source tree
+      - name: Norma chmod 
        shell: bash
        run: |
           set -euxo pipefail
