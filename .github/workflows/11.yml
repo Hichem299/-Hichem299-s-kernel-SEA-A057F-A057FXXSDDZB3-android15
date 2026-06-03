@@ -87,9 +87,8 @@ jobs:
               https://android.googlesource.com/platform/prebuilts/bazel/linux-x86_64 \
               kernel_platform/prebuilts/bazel/linux-x86_64
           fi
-
-            - name: Fix script paths and permissions
-        run: |
+          - name: Fix script paths and permissions
+         run: |
           set -eux
 
           chmod +x build_kernel_GKI.sh || true
