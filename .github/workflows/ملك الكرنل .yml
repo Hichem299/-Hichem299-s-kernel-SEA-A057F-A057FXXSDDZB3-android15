@@ -298,6 +298,13 @@ jobs:
           inject_config CONFIG_GUNYAH_RESOURCE_MANAGER y
           inject_config CONFIG_QCOM_SCM            y
           inject_config CONFIG_SYS_HYPERVISOR      y
+          inject_config CONFIG_SECURITY_DEFEX           n
+          inject_config CONFIG_HARDENED_USERCOPY        n
+          inject_config CONFIG_INTEGRITY_TRUSTED_KEYRING n
+          inject_config CONFIG_SECURITY_LOCKDOWN_LSM    n
+          # LSM list: selinux فقط + bpf
+          sed -i '/^CONFIG_LSM=/d' "${OUT_DIR}/.config"
+          echo 'CONFIG_LSM="selinux,bpf"' >> "${OUT_DIR}/.config"
 
           # ── CMDLINE: extend (safe for Samsung — does not override bootloader) ─
           inject_config CONFIG_CMDLINE_EXTEND      y
