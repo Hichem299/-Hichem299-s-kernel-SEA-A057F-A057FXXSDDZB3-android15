@@ -269,6 +269,8 @@ jobs:
           inject_config CONFIG_KVM                 y
           inject_config CONFIG_KVM_ARM_HOST        y
           inject_config CONFIG_KVM_S2MPU           n
+          inject_config CONFIG_KVM_S2MPU           n
+          inject_config CONFIG_SECURITY_DEFEX      n
           inject_config CONFIG_KVM_ARM_PMU         y
           inject_config CONFIG_KVM_ARM_VGIC        y
           inject_config CONFIG_KVM_ARM_VGIC_V3     y
