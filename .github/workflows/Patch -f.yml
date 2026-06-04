@@ -1,0 +1,341 @@
+name: Build Samsung Galaxy A05s SM-A057F Kernel
+
+on:
+  workflow_dispatch:
+    inputs:
+      kp_target:
+        description: "Kernel target (e.g., m269_sec_xx)"
+        required: false
+        default: "m269_sec_xx"
+      build_variant:
+        description: "Build variant"
+        required: false
+        default: "user"
+  push:
+    branches:
+      - main
+      - master
+
+env:
+  CHIPSET_NAME: sm6225
+  BUILD_TARGET_INPUT: ${{ github.event.inputs.kp_target || 'm269_sec_xx' }}
+  TARGET_BUILD_VARIANT: ${{ github.event.inputs.build_variant || 'user' }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          submodules: recursive
+
+      - name: Free disk space
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo rm -rf /usr/local/lib/android /opt/ghc || true
+          sudo docker system prune -af || true
+          df -h
+
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            bc bison build-essential ccache clang curl \
+            device-tree-compiler dwarves file flex \
+            g++-aarch64-linux-gnu gcc-aarch64-linux-gnu \
+            git jq libdw-dev libelf-dev libncurses-dev \
+            libssl-dev lld llvm lz4 make meson ninja-build \
+            pahole python-is-python3 python3 python3-pip \
+            repo rsync unzip wget xz-utils zip zstd cpio \
+            ca-certificates
+
+      - name: Setup repo and detect source tree
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+          # Fix CRLF on shell/perl scripts
+          find . -type f \( -name "*.sh" -o -name "*.pl" \) -print0 \
+            | xargs -0 -r sed -i 's/\r$//'
+
+          # Make scripts executable
+          find . -type f \( -name "*.sh" -o -name "*.pl" -o -name "*.py" \) \
+            -print0 | xargs -0 -r chmod 755
+
+          find "${GITHUB_WORKSPACE}" -path "*/scripts/*" -maxdepth 8 \
+            -type f ! -name "*.*" -exec chmod 755 {} + 2>/dev/null || true
+
+          chmod +x build_kernel_GKI.sh 2>/dev/null || true
+
+          for f in \
+            kernel_platform/common/scripts/bpf_doc.py \
+            kernel_platform/scripts/bpf_doc.py \
+            kernel_platform/common/scripts/cc-version.sh \
+            kernel_platform/scripts/cc-version.sh; do
+            [ -f "$f" ] && chmod 755 "$f" || true
+          done
+
+          for d in \
+            kernel_platform/common/scripts/kconfig \
+            kernel_platform/scripts/kconfig; do
+            [ -d "$d" ] && find "$d" -name "*.sh" -exec chmod 755 {} + || true
+          done
+
+          # Fix Samsung prepare_vendor.sh path if needed
+          if [ -f "build_kernel_GKI.sh" ]; then
+            sed -i \
+              's#./kernel_platform/build/android/prepare_vendor.sh#./kernel_platform/build/kernel/android/prepare_vendor.sh#g' \
+              build_kernel_GKI.sh || true
+          fi
+
+          # Detect kernel source dir
+          if [ -f "$GITHUB_WORKSPACE/kernel_platform/common/Makefile" ]; then
+            echo "KERNEL_SRC=$GITHUB_WORKSPACE/kernel_platform/common" >> "$GITHUB_ENV"
+            echo "KERNEL_TOP=$GITHUB_WORKSPACE/kernel_platform"        >> "$GITHUB_ENV"
+          elif [ -f "$GITHUB_WORKSPACE/kernel_platform/Makefile" ]; then
+            echo "KERNEL_SRC=$GITHUB_WORKSPACE/kernel_platform"        >> "$GITHUB_ENV"
+            echo "KERNEL_TOP=$GITHUB_WORKSPACE/kernel_platform"        >> "$GITHUB_ENV"
+          else
+            FOUND="$(find "$GITHUB_WORKSPACE" -type f -name Makefile \
+              | grep -E '/(kernel_platform|common)/Makefile$' | head -n 1 || true)"
+            [ -n "$FOUND" ] || { echo "❌ Kernel Makefile not found"; exit 1; }
+            echo "KERNEL_SRC=$(dirname "$FOUND")"        >> "$GITHUB_ENV"
+            echo "KERNEL_TOP=$(dirname "$(dirname "$FOUND")")" >> "$GITHUB_ENV"
+          fi
+
+          # Prefer bundled clang if available
+          CLANG_BIN=""
+          while IFS= read -r -d '' c; do
+            CLANG_BIN="$(dirname "$c")"; break
+          done < <(find "$GITHUB_WORKSPACE" -type f -path "*/bin/clang" \
+                     -print0 2>/dev/null | sort -z)
+
+          if [ -n "$CLANG_BIN" ]; then
+            echo "Using bundled clang: $CLANG_BIN"
+            echo "$CLANG_BIN"    >> "$GITHUB_PATH"
+            echo "CLANG_BIN=$CLANG_BIN" >> "$GITHUB_ENV"
+          else
+            echo "Using system clang"
+          fi
+
+      - name: Show build config
+        shell: bash
+        run: |
+          echo "BUILD_TARGET_INPUT=${BUILD_TARGET_INPUT}"
+          echo "TARGET_BUILD_VARIANT=${TARGET_BUILD_VARIANT}"
+          echo "CHIPSET_NAME=${CHIPSET_NAME}"
+          echo "KERNEL_SRC=${KERNEL_SRC}"
+          clang --version | head -n 1 || true
+          ld.lld --version | head -n 1 || true
+
+      - name: Build kernel
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          # ── Parse target (MODEL_REGION_CARRIER) ──────────────────────
+          IFS='_' read -r MODEL REGION CARRIER <<< "${BUILD_TARGET_INPUT}"
+          MODEL="${MODEL:-m269}"
+          REGION="${REGION:-sec}"
+          CARRIER="${CARRIER:-xx}"
+
+          export MODEL REGION CARRIER
+          export PROJECT_NAME="${MODEL}"
+          export TARGET_BUILD_VARIANT
+
+          # ── Paths ─────────────────────────────────────────────────────
+          export ANDROID_BUILD_TOP="${GITHUB_WORKSPACE}"
+          export TARGET_PRODUCT="gki"
+          export PRODUCT_OUT="${ANDROID_BUILD_TOP}/out/target/product/${TARGET_PRODUCT}"
+          export ANDROID_PRODUCT_OUT="${PRODUCT_OUT}"
+          export OUT_DIR="${ANDROID_BUILD_TOP}/out/msm-${CHIPSET_NAME}-${TARGET_PRODUCT}"
+          export DIST_DIR="${OUT_DIR}/dist"
+          mkdir -p "${PRODUCT_OUT}" "${OUT_DIR}" "${DIST_DIR}"
+
+          # ── Toolchain ─────────────────────────────────────────────────
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export LLVM=1
+          export LLVM_IAS=1
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          export CC=clang
+          export LD=ld.lld
+          export AR=llvm-ar
+          export NM=llvm-nm
+          export OBJCOPY=llvm-objcopy
+          export OBJDUMP=llvm-objdump
+          export READELF=llvm-readelf
+          export STRIP=llvm-strip
+
+          # ── Build env ─────────────────────────────────────────────────
+          export KBUILD_BUILD_TIMESTAMP=""
+          export KBUILD_BUILD_USER="builder"
+          export KBUILD_BUILD_HOST="github-actions"
+
+          cd "${KERNEL_SRC}"
+
+          command -v clang >/dev/null || { echo "❌ clang not found"; exit 1; }
+
+          chmod +x scripts/cc-version.sh scripts/kconfig/merge_config.sh 2>/dev/null || true
+          find scripts -maxdepth 3 -type f ! -name "*.*" -exec chmod 755 {} + 2>/dev/null || true
+
+          # ── دالة مشتركة للـ inject ────────────────────────────────────
+          # تُستخدم مرتين: قبل olddefconfig وبعده
+          do_inject() {
+            local target="$1"
+            local cfg="${KERNEL_SRC}/scripts/config"
+
+            # LTO — تعطيل لتجنب segfault في LLVM
+            ${cfg} --file "${target}" \
+              --disable CONFIG_LTO_NONE \
+              --disable CONFIG_LTO_CLANG_FULL \
+              --disable CONFIG_LTO_CLANG_THIN
+
+            # KVM / Virtualization
+            ${cfg} --file "${target}" \
+              --enable  CONFIG_VIRTUALIZATION \
+              --enable  CONFIG_KVM \
+              --enable  CONFIG_KVM_ARM_HOST \
+              --enable  CONFIG_KVM_ARM_VGIC \
+              --enable  CONFIG_KVM_ARM_VGIC_V3 \
+              --disable CONFIG_KVM_S2MPU \
+              --enable  CONFIG_KVM_ARM_PMU \
+              --enable  CONFIG_ARM64_VHE
+
+            # VirtIO
+            ${cfg} --file "${target}" \
+              --enable CONFIG_VIRTIO \
+              --enable CONFIG_VIRTIO_BLK \
+              --enable CONFIG_VIRTIO_NET \
+              --enable CONFIG_VIRTIO_CONSOLE \
+              --enable CONFIG_VIRTIO_INPUT \
+              --enable CONFIG_VIRTIO_MMIO \
+              --enable CONFIG_VHOST \
+              --enable CONFIG_VHOST_NET
+
+            # Qualcomm / Gunyah
+            ${cfg} --file "${target}" \
+              --enable CONFIG_QCOM_SCM \
+              --enable CONFIG_GUNYAH \
+              --enable CONFIG_GUNYAH_PLATFORM \
+              --enable CONFIG_GUNYAH_RESOURCE_MANAGER \
+              --enable CONFIG_SYS_HYPERVISOR
+
+            # Security
+            ${cfg} --file "${target}" \
+              --enable  CONFIG_SECURITY \
+              --enable  CONFIG_SECURITY_SELINUX \
+              --disable CONFIG_SECURITY_DEFEX
+
+            # Cmdline — EXTEND لا FORCE
+            ${cfg} --file "${target}" \
+              --enable  CONFIG_CMDLINE_EXTEND \
+              --disable CONFIG_CMDLINE_FORCE
+
+            # CONFIG_CMDLINE string — scripts/config لا يدعم strings
+            sed -i '/^CONFIG_CMDLINE=/d' "${target}"
+            echo 'CONFIG_CMDLINE="kvm-arm.mode=nvhe"' >> "${target}"
+          }
+
+          # ── STEP 1: Base defconfig ────────────────────────────────────
+          echo ">>> gki_defconfig"
+          make O="${OUT_DIR}" gki_defconfig
+
+          # ── STEP 2: Inject (جولة أولى) ───────────────────────────────
+          echo ">>> Injecting configs (round 1)"
+          do_inject "${OUT_DIR}/.config"
+
+          # ── STEP 3: Resolve dependencies ──────────────────────────────
+          # olddefconfig يُعدّل .config ليحل التبعيات — قد يُعيد كتابة بعض configs
+          echo ">>> olddefconfig"
+          make O="${OUT_DIR}" olddefconfig
+
+          # ── STEP 4: Re-inject (جولة ثانية — تثبيت نهائي) ─────────────
+          # هذا يُصحح ما غيّره olddefconfig
+          echo ">>> Re-injecting configs (round 2 — final freeze)"
+          do_inject "${OUT_DIR}/.config"
+
+          # ── STEP 5: حفظ نسخة مجمّدة في KCONFIG_ALLCONFIG ────────────
+          # KCONFIG_ALLCONFIG يمنع Kconfig أثناء البناء من تغيير
+          # أي config موجود في هذا الملف
+          FROZEN_CFG="${OUT_DIR}/frozen.config"
+          grep -E \
+            "^(CONFIG_LTO|CONFIG_VIRTUALIZATION|CONFIG_KVM|CONFIG_ARM64_VHE|\
+CONFIG_VIRTIO|CONFIG_VHOST|CONFIG_QCOM_SCM|CONFIG_GUNYAH|\
+CONFIG_SECURITY|CONFIG_CMDLINE)" \
+            "${OUT_DIR}/.config" > "${FROZEN_CFG}"
+          export KCONFIG_ALLCONFIG="${FROZEN_CFG}"
+
+          echo ">>> Frozen configs:"
+          cat "${FROZEN_CFG}"
+
+          # ── STEP 6: Verify ────────────────────────────────────────────
+          echo "=== KVM ==="
+          grep -E "^(CONFIG_KVM|CONFIG_VIRTUALIZATION|CONFIG_ARM64_VHE)" \
+            "${OUT_DIR}/.config" || true
+          echo "=== CMDLINE ==="
+          grep "^CONFIG_CMDLINE" "${OUT_DIR}/.config" || true
+          echo "=== LTO ==="
+          grep "CONFIG_LTO" "${OUT_DIR}/.config" || true
+
+          # ── STEP 7: Build ─────────────────────────────────────────────
+          echo ">>> Building Image + modules ($(nproc) threads)"
+          make O="${OUT_DIR}" -j"$(nproc)" Image modules
+
+          # ── STEP 8: Collect output ────────────────────────────────────
+          if [ -f "${OUT_DIR}/arch/arm64/boot/Image" ]; then
+            echo "✅ Image built successfully"
+            cp "${OUT_DIR}/arch/arm64/boot/Image" "${DIST_DIR}/Image"
+          else
+            echo "❌ Image not found"
+            exit 1
+          fi
+
+          [ -f "${OUT_DIR}/arch/arm64/boot/Image.gz" ] && \
+            cp "${OUT_DIR}/arch/arm64/boot/Image.gz" "${DIST_DIR}/Image.gz" || true
+
+          # ── STEP 9: prepare_vendor.sh (اختياري) ──────────────────────
+          PREPARE_VENDOR="$(find "${ANDROID_BUILD_TOP}" -type f \
+            -name prepare_vendor.sh | head -n 1 || true)"
+          if [ -n "${PREPARE_VENDOR}" ]; then
+            chmod +x "${PREPARE_VENDOR}"
+            (cd "$(dirname "${PREPARE_VENDOR}")" && \
+              bash "$(basename "${PREPARE_VENDOR}")" sec "${TARGET_PRODUCT}") \
+              || echo "⚠️ prepare_vendor.sh failed (non-fatal)"
+          fi
+
+      - name: Collect artifacts
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          mkdir -p artifacts
+
+          find out -type f \( \
+            -name "Image" -o -name "Image.gz" -o -name "Image.gz-dtb" \
+          \) -exec cp --parents {} artifacts/ \; 2>/dev/null || true
+
+          find . -maxdepth 4 -type f -name "*.zip" \
+            -exec cp --parents {} artifacts/ \; 2>/dev/null || true
+
+          echo "Collected:"
+          find artifacts -type f | sort || true
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: A05s-A057F-kernel-${{ github.run_number }}
+          path: artifacts/**
+          if-no-files-found: warn
+          retention-days: 7
+          compression-level: 0
