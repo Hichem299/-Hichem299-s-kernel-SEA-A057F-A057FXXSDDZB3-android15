@@ -266,7 +266,6 @@ jobs:
 
           # ── KVM / Virtualization ─────────────────────────────────────────────
           inject_config CONFIG_VIRTUALIZATION      y
-          inject_config CONFIG_KVM                 y
           inject_config CONFIG_KVM_ARM_HOST        y
           inject_config CONFIG_KVM_S2MPU           n
           inject_config CONFIG_KVM_S2MPU           n
@@ -276,6 +275,12 @@ jobs:
           inject_config CONFIG_KVM_ARM_VGIC_V3     y
           inject_config CONFIG_KVM_ARM_TIMER       y
           inject_config CONFIG_ARM64_VHE           y
+          inject_config CONFIG_SECURITY_DEFEX           n
+          inject_config CONFIG_HARDENED_USERCOPY        n
+          inject_config CONFIG_INTEGRITY_TRUSTED_KEYRING n
+          inject_config CONFIG_SECURITY_LOCKDOWN_LSM    n
+        
+
 
           # ── Virtio ───────────────────────────────────────────────────────────
           inject_config CONFIG_VIRTIO              y
