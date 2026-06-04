@@ -308,10 +308,10 @@ jobs:
           # إضافة أي إعدادات إضافية هنا
           cat >> "${OUT_DIR}/.config" << 'EOF'
 
-# إعدادات إضافية
-CONFIG_SECURITY=y
-CONFIG_SECURITY_SELINUX=y
-EOF
+            # إعدادات إضافية
+            CONFIG_SECURITY=y
+            CONFIG_SECURITY_SELINUX=y
+             EOF
 
           # ============================================================
           # STEP 5: إغلاق .config - لا يتغير أبداً
