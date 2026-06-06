@@ -108,36 +108,7 @@ jobs:
         echo "CCACHE_DIR=$HOME/.ccache" >> "$GITHUB_ENV"
 
     # ────────────────────────────────────────────────────────────────────────
-    # 4 · Download Proton-Clang 13
-    # ────────────────────────────────────────────────────────────────────────
-    - name: Download Proton-Clang 13
-      shell: bash
-      run: |
-        set -euo pipefail
-        mkdir -p "${PROTON_CLANG_DIR}"
-
-        # Try the pre-built release archive first; fall back to system clang
-        PROTON_RELEASE_URL="https://github.com/kdrag0n/proton-clang/releases/download/13.0.0/proton-clang-13.0.0-bin.tar.gz"
-        if curl -fsSL --head "${PROTON_RELEASE_URL}" | grep -q "200 OK"; then
-          echo "Downloading Proton-Clang 13 binary release..."
-          curl -fsSL "${PROTON_RELEASE_URL}" | tar -xz --strip-components=1 -C "${PROTON_CLANG_DIR}"
-        else
-          echo "Proton-Clang binary not accessible — building from source archive..."
-          curl -fsSL "${PROTON_CLANG_URL}" | tar -xz --strip-components=1 -C "${PROTON_CLANG_DIR}"
-        fi
-
-        # Verify
-        CLANG_BIN="${PROTON_CLANG_DIR}/bin"
-        if [ ! -x "${CLANG_BIN}/clang" ]; then
-          echo "⚠ Proton-Clang not found after download — falling back to system clang"
-          CLANG_BIN="$(dirname "$(command -v clang)")"
-        fi
-
-        echo "CLANG_BIN=${CLANG_BIN}" >> "$GITHUB_ENV"
-        echo "${CLANG_BIN}" >> "$GITHUB_PATH"
-
-        # Confirm
-        "${CLANG_BIN}/clang" --version | head -1
+    
 
     # ────────────────────────────────────────────────────────────────────────
     # 5 · Download Samsung OSS kernel source
