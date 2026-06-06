@@ -108,7 +108,36 @@ jobs:
         echo "CCACHE_DIR=$HOME/.ccache" >> "$GITHUB_ENV"
 
     # ────────────────────────────────────────────────────────────────────────
-    
+    # 4 · Download Proton-Clang 13
+    # ────────────────────────────────────────────────────────────────────────
+    - name: Download Proton-Clang 13
+      shell: bash
+      run: |
+        set -euo pipefail
+        mkdir -p "${PROTON_CLANG_DIR}"
+
+        # Try the pre-built release archive first; fall back to system clang
+        PROTON_RELEASE_URL="https://github.com/kdrag0n/proton-clang/releases/download/13.0.0/proton-clang-13.0.0-bin.tar.gz"
+        if curl -fsSL --head "${PROTON_RELEASE_URL}" | grep -q "200 OK"; then
+          echo "Downloading Proton-Clang 13 binary release..."
+          curl -fsSL "${PROTON_RELEASE_URL}" | tar -xz --strip-components=1 -C "${PROTON_CLANG_DIR}"
+        else
+          echo "Proton-Clang binary not accessible — building from source archive..."
+          curl -fsSL "${PROTON_CLANG_URL}" | tar -xz --strip-components=1 -C "${PROTON_CLANG_DIR}"
+        fi
+
+        # Verify
+        CLANG_BIN="${PROTON_CLANG_DIR}/bin"
+        if [ ! -x "${CLANG_BIN}/clang" ]; then
+          echo "⚠ Proton-Clang not found after download — falling back to system clang"
+          CLANG_BIN="$(dirname "$(command -v clang)")"
+        fi
+
+        echo "CLANG_BIN=${CLANG_BIN}" >> "$GITHUB_ENV"
+        echo "${CLANG_BIN}" >> "$GITHUB_PATH"
+
+        # Confirm
+        "${CLANG_BIN}/clang" --version | head -1
 
     # ────────────────────────────────────────────────────────────────────────
     # 5 · Download Samsung OSS kernel source
@@ -428,8 +457,16 @@ jobs:
         echo ""
 
         # ══════════════════════════════════════════════════════════════════
-        # STEP 7 — Compile
+        # STEP 7 — Compile  (مقسّم مرحلتين مع inject في المنتصف)
         # ══════════════════════════════════════════════════════════════════
+
+        # المرحلة 7a: prepare + scripts فقط — يولّد autoconf.h والرموز
+        eval "${MAKE}" -j"$(nproc)" prepare scripts
+
+        # inject بعد ما بدأ البيلد فعلياً (بعد prepare)
+        do_inject
+
+        # المرحلة 7b: بناء Image + dtbs + modules بالكامل
         eval "${MAKE}" -j"$(nproc)" Image dtbs modules
 
         # ══════════════════════════════════════════════════════════════════
@@ -512,7 +549,36 @@ jobs:
 
         # Minimal anykernel.sh for SM-A057F
         cat > "${AK3_DIR}/anykernel.sh" << 'AKEOF'
-    
+# AnyKernel3 — SM-A057F / A05s
+properties() { '
+kernel.string=SM-A057F Custom Kernel + KernelSU
+do.devicecheck=1
+do.modules=1
+do.systemless=1
+do.cleanup=1
+do.cleanuponabort=0
+device.name1=a05s
+device.name2=SM-A057F
+supported.versions=13-15
+'; }
+
+block=/dev/block/bootdevice/by-name/boot;
+is_slot_device=0;
+ramdisk_compression=auto;
+patch_vbmeta_flag=auto;
+
+. tools/ak3-core.sh;
+. $AKHOME/patch.d/*;
+AKEOF
+
+        cp "${DIST_DIR}/Image" "${AK3_DIR}/Image"
+
+        ZIP_NAME="SM-A057F_KernelSU-${KSU_REF}_$(date +%Y%m%d-%H%M).zip"
+        cd "${AK3_DIR}"
+        zip -r9 "${GITHUB_WORKSPACE}/out/${ZIP_NAME}" . -x "*.git*" -x "README.md"
+
+        echo "ZIP_NAME=${ZIP_NAME}" >> "$GITHUB_ENV"
+        ls -lh "${GITHUB_WORKSPACE}/out/${ZIP_NAME}"
 
     # ────────────────────────────────────────────────────────────────────────
     # 11 · Collect all artifacts
