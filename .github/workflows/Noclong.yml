@@ -101,7 +101,6 @@ jobs:
         echo "CCACHE_DIR=$HOME/.ccache" >> "$GITHUB_ENV"
 
     # ────────────────────────────────────────────────────────────────────────
-──────────────────────────────
     # 5 · Download Samsung OSS kernel source
     # ────────────────────────────────────────────────────────────────────────
     - name: Download Samsung OSS kernel source
