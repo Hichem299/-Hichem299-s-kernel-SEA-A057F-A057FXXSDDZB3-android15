@@ -1,9 +1,3 @@
-# ╔══════════════════════════════════════════════════════════════════╗
-# ║   Samsung Galaxy A05s — SM-A057F  Kernel Builder               ║
-# ║   Source : Samsung OSS A057FXXSDDZB3 (Linux 5.15 / sm6225)     ║
-# ║   Toolchain : Proton-Clang 13                                   ║
-# ║   Features : KernelSU (latest) + KVM/VirtIO + LTO Thin         ║
-# ╚══════════════════════════════════════════════════════════════════╝
 
 name: Build SM-A057F Kernel (A057FXXSDDZB3)
 
