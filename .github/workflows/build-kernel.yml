@@ -1,10 +1,3 @@
-# ╔══════════════════════════════════════════════════════════════════╗
-# ║   Samsung Galaxy A05s — SM-A057F  Kernel Builder               ║
-# ║   Source : Samsung OSS A057FXXSDDZB3 (Linux 5.15 / sm6225)     ║
-# ║   Toolchain : Proton-Clang 13                                   ║
-# ║   Features : KernelSU (latest) + KVM/VirtIO + LTO Thin         ║
-# ╚══════════════════════════════════════════════════════════════════╝
-
 name: Build SM-A057F Kernel (A057FXXSDDZB3)
 
 on:
@@ -52,7 +45,7 @@ env:
 
 jobs:
   build:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-20.04
     timeout-minutes: 360
 
     steps:
@@ -372,16 +365,6 @@ jobs:
           inject_config CONFIG_GUNYAH_RESOURCE_MANAGER      y
           inject_config CONFIG_QCOM_SCM                     y
 
-          # ── Security: relax lockdown for KVM usability ───────────────────
-          inject_config CONFIG_SECURITY_DEFEX               n
-          inject_config CONFIG_HARDENED_USERCOPY            n
-          inject_config CONFIG_INTEGRITY_TRUSTED_KEYRING    n
-          inject_config CONFIG_SECURITY_LOCKDOWN_LSM        n
-
-          # ── LSM list ─────────────────────────────────────────────────────
-          sed -i '/^CONFIG_LSM=/d' "${file}"
-          echo 'CONFIG_LSM="selinux,bpf"' >> "${file}"
-
           # ── KernelSU config ───────────────────────────────────────────────
           inject_config CONFIG_KPROBES                      y
           inject_config CONFIG_HAVE_KPROBES                 y
@@ -446,7 +429,6 @@ jobs:
           "VirtIO:CONFIG_VIRTIO,CONFIG_VHOST" \
           "KernelSU/Kprobes:CONFIG_KPROBES,CONFIG_KALLSYMS" \
           "Gunyah:CONFIG_GUNYAH,CONFIG_QCOM_SCM" \
-          "LSM:CONFIG_LSM,CONFIG_SECURITY" \
           "CMDLINE:CONFIG_CMDLINE"; do
           label="${section%%:*}"
           patterns="${section#*:}"
@@ -457,15 +439,13 @@ jobs:
         echo ""
 
         # ══════════════════════════════════════════════════════════════════
-        # STEP 7 — سكربت inject خلفي يشتغل أثناء البيلد (لا يوقفه أبداً)
+        # STEP 7 — Background watcher inject
         # ══════════════════════════════════════════════════════════════════
         (
-          # انتظر حتى يولّد make autoconf.h فعلياً
           while [ ! -f "${OUT_DIR}/include/generated/autoconf.h" ]; do
             sleep 2
           done
           echo ">>> [watcher] autoconf.h detected — running do_inject() in background"
-          # redefine inject_config داخل الـ subshell
           inject_config() {
             local cfg="$1" val="$2" file="${OUT_DIR}/.config"
             sed -i "/^${cfg}[= ]/d;/^# ${cfg} is not set/d" "${file}"
@@ -476,7 +456,6 @@ jobs:
             fi
           }
           do_inject
-          # احذف autoconf لإجبار make على إعادة توليده من .config الجديد
           rm -f "${OUT_DIR}/include/generated/autoconf.h" \
                 "${OUT_DIR}/include/config/auto.conf" \
                 "${OUT_DIR}/include/config/auto.conf.cmd"
@@ -485,7 +464,7 @@ jobs:
         WATCHER_PID=$!
 
         # ══════════════════════════════════════════════════════════════════
-        # STEP 8 — Compile (لا يتوقف أبداً بسبب الـ watcher)
+        # STEP 8 — Compile
         # ══════════════════════════════════════════════════════════════════
         eval "${MAKE}" -j"$(nproc)" Image dtbs modules || {
           wait "${WATCHER_PID}" 2>/dev/null || true
@@ -495,25 +474,19 @@ jobs:
         wait "${WATCHER_PID}" 2>/dev/null || true
 
         # ══════════════════════════════════════════════════════════════════
-        # STEP 8 — Collect outputs
+        # STEP 9 — Collect outputs
         # ══════════════════════════════════════════════════════════════════
-        # Kernel image
         cp "${OUT_DIR}/arch/arm64/boot/Image" "${DIST_DIR}/Image"
 
         [ -f "${OUT_DIR}/arch/arm64/boot/Image.gz" ] && \
           cp "${OUT_DIR}/arch/arm64/boot/Image.gz" "${DIST_DIR}/Image.gz" || true
 
-        # DTBs
-        find "${OUT_DIR}/arch/arm64/boot/dts" -name "*.dtb" -exec cp {} "${DIST_DIR}/" \; 2>/dev/null || true
-
-        # DTBO (if present)
+        find "${OUT_DIR}/arch/arm64/boot/dts" -name "*.dtb"  -exec cp {} "${DIST_DIR}/" \; 2>/dev/null || true
         find "${OUT_DIR}/arch/arm64/boot/dts" -name "*.dtbo" -exec cp {} "${DIST_DIR}/" \; 2>/dev/null || true
 
-        # Kernel modules
         mkdir -p "${DIST_DIR}/modules"
         find "${OUT_DIR}" -name "*.ko" -exec cp {} "${DIST_DIR}/modules/" \; 2>/dev/null || true
 
-        # ccache stats
         ccache -s
 
         echo ""
@@ -554,9 +527,6 @@ jobs:
         echo ""; echo "--- CMDLINE ---"
         grep "CONFIG_CMDLINE" "${CFG}" || echo "(none)"
 
-        echo ""; echo "--- LSM ---"
-        grep "CONFIG_LSM" "${CFG}" || echo "(none)"
-
         echo ""; echo "--- KernelSU version ---"
         grep "CONFIG_KSU" "${CFG}" || echo "(none)"
 
@@ -574,36 +544,34 @@ jobs:
 
         # Minimal anykernel.sh for SM-A057F
         cat > "${AK3_DIR}/anykernel.sh" << 'AKEOF'
-# AnyKernel3 — SM-A057F / A05s
-properties() { '
-kernel.string=SM-A057F Custom Kernel + KernelSU
-do.devicecheck=1
-do.modules=1
-do.systemless=1
-do.cleanup=1
-do.cleanuponabort=0
-device.name1=a05s
-device.name2=SM-A057F
-supported.versions=13-15
-'; }
-
-block=/dev/block/bootdevice/by-name/boot;
-is_slot_device=0;
-ramdisk_compression=auto;
-patch_vbmeta_flag=auto;
-
-. tools/ak3-core.sh;
-. $AKHOME/patch.d/*;
-AKEOF
+        # AnyKernel3 config for SM-A057F
+        properties() { '
+        kernel.string=SM-A057F KSU Kernel
+        do.devicecheck=1
+        do.modules=1
+        do.systemless=1
+        do.cleanup=1
+        do.cleanuponabort=0
+        device.name1=a05s
+        supported.versions=13-15
+        '; }
+        block=/dev/block/bootdevice/by-name/boot;
+        is_slot_device=0;
+        ramdisk_compression=auto;
+        patch_vbmeta_flag=auto;
+        . tools/ak3-core.sh;
+        . tools/install.sh;
+        AKEOF
 
         cp "${DIST_DIR}/Image" "${AK3_DIR}/Image"
 
-        ZIP_NAME="SM-A057F_KernelSU-${KSU_REF}_$(date +%Y%m%d-%H%M).zip"
-        cd "${AK3_DIR}"
-        zip -r9 "${GITHUB_WORKSPACE}/out/${ZIP_NAME}" . -x "*.git*" -x "README.md"
+        # Copy DTBs if present
+        find "${DIST_DIR}" -name "*.dtb" -exec cp {} "${AK3_DIR}/" \; 2>/dev/null || true
 
-        echo "ZIP_NAME=${ZIP_NAME}" >> "$GITHUB_ENV"
-        ls -lh "${GITHUB_WORKSPACE}/out/${ZIP_NAME}"
+        ZIP_NAME="SM-A057F-KSU-${SAMSUNG_OSS_TAG}-$(date +%Y%m%d-%H%M).zip"
+        cd "${AK3_DIR}"
+        zip -r9 "${GITHUB_WORKSPACE}/out/${ZIP_NAME}" . -x '*.git*'
+        echo "Flashable zip: ${ZIP_NAME}"
 
     # ────────────────────────────────────────────────────────────────────────
     # 11 · Collect all artifacts
