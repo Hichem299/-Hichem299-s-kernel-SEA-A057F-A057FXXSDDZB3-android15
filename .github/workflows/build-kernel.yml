@@ -457,17 +457,42 @@ jobs:
         echo ""
 
         # ══════════════════════════════════════════════════════════════════
-        # STEP 7 — Compile  (مقسّم مرحلتين مع inject في المنتصف)
+        # STEP 7 — سكربت inject خلفي يشتغل أثناء البيلد (لا يوقفه أبداً)
         # ══════════════════════════════════════════════════════════════════
+        (
+          # انتظر حتى يولّد make autoconf.h فعلياً
+          while [ ! -f "${OUT_DIR}/include/generated/autoconf.h" ]; do
+            sleep 2
+          done
+          echo ">>> [watcher] autoconf.h detected — running do_inject() in background"
+          # redefine inject_config داخل الـ subshell
+          inject_config() {
+            local cfg="$1" val="$2" file="${OUT_DIR}/.config"
+            sed -i "/^${cfg}[= ]/d;/^# ${cfg} is not set/d" "${file}"
+            if [ "${val}" = "n" ]; then
+              echo "# ${cfg} is not set" >> "${file}"
+            else
+              echo "${cfg}=${val}" >> "${file}"
+            fi
+          }
+          do_inject
+          # احذف autoconf لإجبار make على إعادة توليده من .config الجديد
+          rm -f "${OUT_DIR}/include/generated/autoconf.h" \
+                "${OUT_DIR}/include/config/auto.conf" \
+                "${OUT_DIR}/include/config/auto.conf.cmd"
+          echo ">>> [watcher] inject done — autoconf.h removed, make will regenerate"
+        ) &
+        WATCHER_PID=$!
 
-        # المرحلة 7a: prepare + scripts فقط — يولّد autoconf.h والرموز
-        eval "${MAKE}" -j"$(nproc)" prepare scripts
-
-        # inject بعد ما بدأ البيلد فعلياً (بعد prepare)
-        do_inject
-
-        # المرحلة 7b: بناء Image + dtbs + modules بالكامل
-        eval "${MAKE}" -j"$(nproc)" Image dtbs modules
+        # ══════════════════════════════════════════════════════════════════
+        # STEP 8 — Compile (لا يتوقف أبداً بسبب الـ watcher)
+        # ══════════════════════════════════════════════════════════════════
+        eval "${MAKE}" -j"$(nproc)" Image dtbs modules || {
+          wait "${WATCHER_PID}" 2>/dev/null || true
+          echo ">>> Retrying build after background inject..."
+          eval "${MAKE}" -j"$(nproc)" Image dtbs modules
+        }
+        wait "${WATCHER_PID}" 2>/dev/null || true
 
         # ══════════════════════════════════════════════════════════════════
         # STEP 8 — Collect outputs
