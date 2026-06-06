@@ -1,0 +1,608 @@
+# ╔══════════════════════════════════════════════════════════════════╗
+# ║   Samsung Galaxy A05s — SM-A057F  Kernel Builder               ║
+# ║   Source : Samsung OSS A057FXXSDDZB3 (Linux 5.15 / sm6225)     ║
+# ║   Toolchain : Proton-Clang 13                                   ║
+# ║   Features : KernelSU (latest) + KVM/VirtIO + LTO Thin         ║
+# ╚══════════════════════════════════════════════════════════════════╝
+
+name: Build SM-A057F Kernel (A057FXXSDDZB3)
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_variant:
+        description: "Build variant (user / userdebug / eng)"
+        required: false
+        default: "user"
+      ksu_version:
+        description: "KernelSU tag (leave empty for latest)"
+        required: false
+        default: ""
+      enable_kvm:
+        description: "Enable KVM + VirtIO"
+        required: false
+        default: "true"
+      lto_mode:
+        description: "LTO mode (thin / full / none)"
+        required: false
+        default: "thin"
+  push:
+    branches: [main, master]
+
+# ── Global environment ────────────────────────────────────────────────────────
+env:
+  # Device / chipset
+  DEVICE_MODEL:    a05s
+  CHIPSET_NAME:    sm6225
+  DEFCONFIG:       vendor/parrot_defconfig   # correct defconfig for sm6225/A05s
+  KERNEL_ARCH:     arm64
+
+  # Samsung OSS release
+  SAMSUNG_OSS_TAG: A057FXXSDDZB3
+
+  # Proton-Clang 13 (frozen, reproducible)
+  PROTON_CLANG_URL: "https://github.com/kdrag0n/proton-clang/archive/refs/heads/master.tar.gz"
+  PROTON_CLANG_DIR: "${{ github.workspace }}/toolchains/proton-clang"
+
+  # Build inputs
+  TARGET_BUILD_VARIANT: ${{ github.event.inputs.build_variant  || 'user'  }}
+  KSU_VERSION:          ${{ github.event.inputs.ksu_version    || ''      }}
+  ENABLE_KVM:           ${{ github.event.inputs.enable_kvm     || 'true'  }}
+  LTO_MODE:             ${{ github.event.inputs.lto_mode       || 'thin'  }}
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+
+    steps:
+    # ────────────────────────────────────────────────────────────────────────
+    # 1 · Free disk space
+    # ────────────────────────────────────────────────────────────────────────
+    - name: Free disk space
+      shell: bash
+      run: |
+        set -euo pipefail
+        sudo rm -rf \
+          /usr/local/lib/android \
+          /opt/ghc \
+          /usr/share/dotnet \
+          /opt/hostedtoolcache/CodeQL \
+          2>/dev/null || true
+        sudo docker system prune -af 2>/dev/null || true
+        df -h
+
+    # ────────────────────────────────────────────────────────────────────────
+    # 2 · Install build dependencies
+    # ────────────────────────────────────────────────────────────────────────
+    - name: Install build dependencies
+      shell: bash
+      run: |
+        set -euo pipefail
+        sudo apt-get update -qq
+        sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+          bc bison build-essential ca-certificates ccache cpio curl \
+          device-tree-compiler dwarves file flex git jq \
+          libdw-dev libelf-dev libncurses-dev libssl-dev \
+          lld llvm lz4 make meson ninja-build pahole \
+          python-is-python3 python3 python3-pip \
+          gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
+          rsync unzip wget xz-utils zip zstd
+
+    # ────────────────────────────────────────────────────────────────────────
+    # 3 · Configure ccache
+    # ────────────────────────────────────────────────────────────────────────
+    - name: Configure ccache
+      uses: actions/cache@v4
+      with:
+        path: ~/.ccache
+        key: ccache-a057f-${{ github.sha }}
+        restore-keys: ccache-a057f-
+
+    - name: Set ccache limits
+      shell: bash
+      run: |
+        ccache --max-size=5G
+        ccache --set-config=compression=true
+        ccache -z          # reset stats for this run
+        echo "CCACHE_DIR=$HOME/.ccache" >> "$GITHUB_ENV"
+
+    # ────────────────────────────────────────────────────────────────────────
+    # 4 · Download Proton-Clang 13
+    # ────────────────────────────────────────────────────────────────────────
+    - name: Download Proton-Clang 13
+      shell: bash
+      run: |
+        set -euo pipefail
+        mkdir -p "${PROTON_CLANG_DIR}"
+
+        # Try the pre-built release archive first; fall back to system clang
+        PROTON_RELEASE_URL="https://github.com/kdrag0n/proton-clang/releases/download/13.0.0/proton-clang-13.0.0-bin.tar.gz"
+        if curl -fsSL --head "${PROTON_RELEASE_URL}" | grep -q "200 OK"; then
+          echo "Downloading Proton-Clang 13 binary release..."
+          curl -fsSL "${PROTON_RELEASE_URL}" | tar -xz --strip-components=1 -C "${PROTON_CLANG_DIR}"
+        else
+          echo "Proton-Clang binary not accessible — building from source archive..."
+          curl -fsSL "${PROTON_CLANG_URL}" | tar -xz --strip-components=1 -C "${PROTON_CLANG_DIR}"
+        fi
+
+        # Verify
+        CLANG_BIN="${PROTON_CLANG_DIR}/bin"
+        if [ ! -x "${CLANG_BIN}/clang" ]; then
+          echo "⚠ Proton-Clang not found after download — falling back to system clang"
+          CLANG_BIN="$(dirname "$(command -v clang)")"
+        fi
+
+        echo "CLANG_BIN=${CLANG_BIN}" >> "$GITHUB_ENV"
+        echo "${CLANG_BIN}" >> "$GITHUB_PATH"
+
+        # Confirm
+        "${CLANG_BIN}/clang" --version | head -1
+
+    # ────────────────────────────────────────────────────────────────────────
+    # 5 · Download Samsung OSS kernel source
+    # ────────────────────────────────────────────────────────────────────────
+    - name: Download Samsung OSS kernel source
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        OSS_URL="https://opensource.samsung.com/uploadSearch?searchValue=${SAMSUNG_OSS_TAG}"
+        KERNEL_DIR="${GITHUB_WORKSPACE}/kernel_src"
+        mkdir -p "${KERNEL_DIR}"
+
+        echo "Attempting to clone Samsung OSS source for ${SAMSUNG_OSS_TAG}..."
+
+        # Primary: use a pre-mirrored GitHub fork if available
+        # (Replace with your own mirror URL if you have one)
+        MIRROR="https://github.com/YOUR_USERNAME/android_kernel_samsung_sm6225"
+        if git ls-remote --exit-code "${MIRROR}" "HEAD" >/dev/null 2>&1; then
+          git clone --depth=1 "${MIRROR}" "${KERNEL_DIR}"
+        else
+          # Fallback: download the OSS zip from Samsung directly
+          echo "Mirror unavailable — downloading Samsung OSS zip..."
+          # Note: Samsung OSS requires browsing their portal manually.
+          # Place the extracted kernel source at kernel_src/ in your repo,
+          # OR set SAMSUNG_OSS_ZIP_URL secret to a direct download link.
+          if [ -n "${SAMSUNG_OSS_ZIP_URL:-}" ]; then
+            curl -fsSL "${SAMSUNG_OSS_ZIP_URL}" -o /tmp/oss.zip
+            unzip -q /tmp/oss.zip -d "${KERNEL_DIR}"
+          else
+            echo "ERROR: No kernel source available."
+            echo "  Option 1: Push Samsung OSS source to your repo (recommended)."
+            echo "  Option 2: Set SAMSUNG_OSS_ZIP_URL secret to a direct download URL."
+            exit 1
+          fi
+        fi
+
+        # Detect actual kernel Makefile location
+        KERNEL_SRC=""
+        for candidate in \
+          "${KERNEL_DIR}/kernel_platform/common" \
+          "${KERNEL_DIR}/kernel_platform" \
+          "${KERNEL_DIR}"; do
+          if [ -f "${candidate}/Makefile" ]; then
+            KERNEL_SRC="${candidate}"
+            break
+          fi
+        done
+
+        if [ -z "${KERNEL_SRC}" ]; then
+          KERNEL_SRC="$(find "${KERNEL_DIR}" -maxdepth 4 -name Makefile | head -1 | xargs dirname)"
+        fi
+
+        [ -n "${KERNEL_SRC}" ] || { echo "Kernel Makefile not found"; exit 1; }
+
+        echo "KERNEL_SRC=${KERNEL_SRC}"             >> "$GITHUB_ENV"
+        echo "KERNEL_TOP=$(dirname "${KERNEL_SRC}")" >> "$GITHUB_ENV"
+
+        # Show kernel version
+        head -5 "${KERNEL_SRC}/Makefile"
+
+    # ────────────────────────────────────────────────────────────────────────
+    # 6 · Inject KernelSU
+    # ────────────────────────────────────────────────────────────────────────
+    - name: Inject KernelSU (latest)
+      shell: bash
+      run: |
+        set -euo pipefail
+        cd "${KERNEL_SRC}"
+
+        if [ -n "${KSU_VERSION}" ]; then
+          KSU_REF="${KSU_VERSION}"
+        else
+          # Fetch latest tag automatically
+          KSU_REF="$(curl -fsSL \
+            'https://api.github.com/repos/tiann/KernelSU/releases/latest' \
+            | jq -r '.tag_name')"
+          echo "Latest KernelSU tag: ${KSU_REF}"
+        fi
+        echo "KSU_REF=${KSU_REF}" >> "$GITHUB_ENV"
+
+        # Official KernelSU setup script
+        curl -fsSL "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" \
+          | bash -s "${KSU_REF}"
+
+        echo "KernelSU ${KSU_REF} injected successfully."
+
+    # ────────────────────────────────────────────────────────────────────────
+    # 7 · Fix permissions across the entire source tree
+    # ────────────────────────────────────────────────────────────────────────
+    - name: Fix source-tree permissions
+      shell: bash
+      run: |
+        set -euo pipefail
+        cd "${KERNEL_SRC}"
+        git config --global --add safe.directory "${KERNEL_SRC}"
+
+        # CRLF → LF on shell / perl scripts
+        find . -type f \( -name "*.sh" -o -name "*.pl" \) -print0 \
+          | xargs -0 -r sed -i 's/\r$//'
+
+        # Named scripts: .sh .pl .py
+        find . -type f \( -name "*.sh" -o -name "*.pl" -o -name "*.py" \) -print0 \
+          | xargs -0 -r chmod 755
+
+        # Extension-less scripts under scripts/
+        find scripts -maxdepth 8 -type f ! -name "*.*" -exec chmod 755 {} + 2>/dev/null || true
+
+        # Critical individual scripts
+        for f in \
+          scripts/cc-version.sh \
+          scripts/kconfig/merge_config.sh \
+          scripts/bpf_doc.py \
+          scripts/link-vmlinux.sh \
+          scripts/mod/modpost; do
+          [ -f "$f" ] && chmod 755 "$f" || true
+        done
+
+    # ────────────────────────────────────────────────────────────────────────
+    # 8 · Build kernel
+    # ────────────────────────────────────────────────────────────────────────
+    - name: Build kernel
+      shell: bash
+      run: |
+        set -euo pipefail
+        cd "${KERNEL_SRC}"
+
+        # ── Output / dist dirs ─────────────────────────────────────────────
+        OUT_DIR="${GITHUB_WORKSPACE}/out/kernel"
+        DIST_DIR="${GITHUB_WORKSPACE}/out/dist"
+        mkdir -p "${OUT_DIR}" "${DIST_DIR}"
+
+        echo "OUT_DIR=${OUT_DIR}"   >> "$GITHUB_ENV"
+        echo "DIST_DIR=${DIST_DIR}" >> "$GITHUB_ENV"
+
+        # ── Toolchain env ──────────────────────────────────────────────────
+        export PATH="${CLANG_BIN}:${PATH}"
+        export ARCH=arm64
+        export SUBARCH=arm64
+        export LLVM=1
+        export LLVM_IAS=1
+        export CROSS_COMPILE=aarch64-linux-gnu-
+        export CLANG_TRIPLE=aarch64-linux-gnu-
+        export CC="ccache clang"
+        export LD=ld.lld
+        export AR=llvm-ar
+        export NM=llvm-nm
+        export OBJCOPY=llvm-objcopy
+        export OBJDUMP=llvm-objdump
+        export READELF=llvm-readelf
+        export STRIP=llvm-strip
+        export HOSTCC="ccache gcc"
+        export HOSTCXX="ccache g++"
+        export HOSTLD=ld
+
+        MAKE="make O=${OUT_DIR} ARCH=arm64 LLVM=1 LLVM_IAS=1
+              CROSS_COMPILE=aarch64-linux-gnu-
+              CC='ccache clang' LD=ld.lld
+              AR=llvm-ar NM=llvm-nm
+              OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump
+              READELF=llvm-readelf STRIP=llvm-strip
+              HOSTCC='ccache gcc' HOSTCXX='ccache g++'"
+
+        # ── Helper: inject_config ──────────────────────────────────────────
+        inject_config() {
+          local cfg="$1"
+          local val="$2"
+          local file="${OUT_DIR}/.config"
+          sed -i "/^${cfg}[= ]/d;/^# ${cfg} is not set/d" "${file}"
+          if [ "${val}" = "n" ]; then
+            echo "# ${cfg} is not set" >> "${file}"
+          else
+            echo "${cfg}=${val}" >> "${file}"
+          fi
+        }
+
+        # ── Helper: do_inject — ALL config overrides in one place ──────────
+        do_inject() {
+          local file="${OUT_DIR}/.config"
+          echo ">>> do_inject() called — applying config overrides..."
+
+          # ── LTO ──────────────────────────────────────────────────────────
+          case "${LTO_MODE}" in
+            thin)
+              inject_config CONFIG_LTO_NONE        n
+              inject_config CONFIG_LTO_CLANG_FULL  n
+              inject_config CONFIG_LTO_CLANG_THIN  y
+              ;;
+            full)
+              inject_config CONFIG_LTO_NONE        n
+              inject_config CONFIG_LTO_CLANG_FULL  y
+              inject_config CONFIG_LTO_CLANG_THIN  n
+              ;;
+            none|*)
+              inject_config CONFIG_LTO_NONE        y
+              inject_config CONFIG_LTO_CLANG_FULL  n
+              inject_config CONFIG_LTO_CLANG_THIN  n
+              ;;
+          esac
+
+          # ── KVM / Virtualization ──────────────────────────────────────────
+          if [ "${ENABLE_KVM}" = "true" ]; then
+            inject_config CONFIG_VIRTUALIZATION              y
+            inject_config CONFIG_KVM_ARM_HOST               y
+            inject_config CONFIG_KVM_ARM_PMU                y
+            inject_config CONFIG_KVM_ARM_VGIC               y
+            inject_config CONFIG_KVM_ARM_VGIC_V3            y
+            inject_config CONFIG_KVM_ARM_TIMER              y
+            inject_config CONFIG_ARM64_VHE                  y
+            inject_config CONFIG_KVM_S2MPU                  n
+
+            # ── VirtIO ──────────────────────────────────────────────────
+            inject_config CONFIG_VIRTIO                     y
+            inject_config CONFIG_VIRTIO_BLK                 y
+            inject_config CONFIG_VIRTIO_NET                 y
+            inject_config CONFIG_VIRTIO_CONSOLE             y
+            inject_config CONFIG_VIRTIO_INPUT               y
+            inject_config CONFIG_VIRTIO_MMIO                y
+            inject_config CONFIG_VHOST                      y
+            inject_config CONFIG_VHOST_NET                  y
+
+            # ── CMDLINE: extend (safe — does NOT override bootloader) ────
+            inject_config CONFIG_CMDLINE_EXTEND             y
+            inject_config CONFIG_CMDLINE_FORCE              n
+            sed -i '/^CONFIG_CMDLINE=/d' "${file}"
+            echo 'CONFIG_CMDLINE="kvm-arm.mode=nvhe"' >> "${file}"
+          fi
+
+          # ── Gunyah / QCOM SCM ────────────────────────────────────────────
+          inject_config CONFIG_GUNYAH                       y
+          inject_config CONFIG_GUNYAH_PLATFORM              y
+          inject_config CONFIG_GUNYAH_RESOURCE_MANAGER      y
+          inject_config CONFIG_QCOM_SCM                     y
+
+          # ── Security: relax lockdown for KVM usability ───────────────────
+          inject_config CONFIG_SECURITY_DEFEX               n
+          inject_config CONFIG_HARDENED_USERCOPY            n
+          inject_config CONFIG_INTEGRITY_TRUSTED_KEYRING    n
+          inject_config CONFIG_SECURITY_LOCKDOWN_LSM        n
+
+          # ── LSM list ─────────────────────────────────────────────────────
+          sed -i '/^CONFIG_LSM=/d' "${file}"
+          echo 'CONFIG_LSM="selinux,bpf"' >> "${file}"
+
+          # ── KernelSU config ───────────────────────────────────────────────
+          inject_config CONFIG_KPROBES                      y
+          inject_config CONFIG_HAVE_KPROBES                 y
+          inject_config CONFIG_KPROBE_EVENTS                y
+
+          # ── Debug / symbols (useful for KSU) ─────────────────────────────
+          inject_config CONFIG_KALLSYMS                     y
+          inject_config CONFIG_KALLSYMS_ALL                 y
+
+          echo ">>> do_inject() done."
+        }
+
+        # ══════════════════════════════════════════════════════════════════
+        # STEP 1 — Base defconfig
+        # ══════════════════════════════════════════════════════════════════
+        eval "${MAKE}" "${DEFCONFIG}"
+
+        # ══════════════════════════════════════════════════════════════════
+        # STEP 2 — First inject (before olddefconfig)
+        # ══════════════════════════════════════════════════════════════════
+        do_inject
+
+        # ══════════════════════════════════════════════════════════════════
+        # STEP 3 — olddefconfig resolves Kconfig dependencies
+        # ══════════════════════════════════════════════════════════════════
+        eval "${MAKE}" olddefconfig
+
+        # ══════════════════════════════════════════════════════════════════
+        # STEP 4 — Second inject (re-enforce after olddefconfig)
+        # ══════════════════════════════════════════════════════════════════
+        do_inject
+
+        # ══════════════════════════════════════════════════════════════════
+        # STEP 5 — KCONFIG_ALLCONFIG frozen layer (third safety net)
+        #          Any config listed here CANNOT be overridden by Kconfig
+        # ══════════════════════════════════════════════════════════════════
+        FROZEN="${OUT_DIR}/frozen.config"
+        {
+          echo "CONFIG_KVM_ARM_HOST=y"
+          echo "CONFIG_VIRTUALIZATION=y"
+          echo "CONFIG_ARM64_VHE=y"
+          echo "CONFIG_KPROBES=y"
+          echo "CONFIG_KALLSYMS=y"
+          echo "CONFIG_KALLSYMS_ALL=y"
+          if [ "${LTO_MODE}" = "thin" ]; then
+            echo "CONFIG_LTO_CLANG_THIN=y"
+          fi
+        } > "${FROZEN}"
+
+        KCONFIG_ALLCONFIG="${FROZEN}" eval "${MAKE}" olddefconfig
+
+        # ══════════════════════════════════════════════════════════════════
+        # STEP 6 — Pre-build config verification
+        # ══════════════════════════════════════════════════════════════════
+        echo ""
+        echo "╔══════════════════════════════════╗"
+        echo "║  PRE-BUILD CONFIG VERIFICATION   ║"
+        echo "╚══════════════════════════════════╝"
+        for section in \
+          "LTO:CONFIG_LTO" \
+          "KVM:CONFIG_KVM,CONFIG_VIRTUALIZATION,CONFIG_ARM64_VHE" \
+          "VirtIO:CONFIG_VIRTIO,CONFIG_VHOST" \
+          "KernelSU/Kprobes:CONFIG_KPROBES,CONFIG_KALLSYMS" \
+          "Gunyah:CONFIG_GUNYAH,CONFIG_QCOM_SCM" \
+          "LSM:CONFIG_LSM,CONFIG_SECURITY" \
+          "CMDLINE:CONFIG_CMDLINE"; do
+          label="${section%%:*}"
+          patterns="${section#*:}"
+          echo ""
+          echo "--- ${label} ---"
+          grep -E "^(${patterns//,/|})" "${OUT_DIR}/.config" || echo "(none found)"
+        done
+        echo ""
+
+        # ══════════════════════════════════════════════════════════════════
+        # STEP 7 — Compile
+        # ══════════════════════════════════════════════════════════════════
+        eval "${MAKE}" -j"$(nproc)" Image dtbs modules
+
+        # ══════════════════════════════════════════════════════════════════
+        # STEP 8 — Collect outputs
+        # ══════════════════════════════════════════════════════════════════
+        # Kernel image
+        cp "${OUT_DIR}/arch/arm64/boot/Image" "${DIST_DIR}/Image"
+
+        [ -f "${OUT_DIR}/arch/arm64/boot/Image.gz" ] && \
+          cp "${OUT_DIR}/arch/arm64/boot/Image.gz" "${DIST_DIR}/Image.gz" || true
+
+        # DTBs
+        find "${OUT_DIR}/arch/arm64/boot/dts" -name "*.dtb" -exec cp {} "${DIST_DIR}/" \; 2>/dev/null || true
+
+        # DTBO (if present)
+        find "${OUT_DIR}/arch/arm64/boot/dts" -name "*.dtbo" -exec cp {} "${DIST_DIR}/" \; 2>/dev/null || true
+
+        # Kernel modules
+        mkdir -p "${DIST_DIR}/modules"
+        find "${OUT_DIR}" -name "*.ko" -exec cp {} "${DIST_DIR}/modules/" \; 2>/dev/null || true
+
+        # ccache stats
+        ccache -s
+
+        echo ""
+        echo "╔═══════════════════════════════╗"
+        echo "║  BUILD COMPLETE               ║"
+        echo "╚═══════════════════════════════╝"
+        ls -lh "${DIST_DIR}/"
+
+    # ────────────────────────────────────────────────────────────────────────
+    # 9 · Post-build config verification (final .config snapshot)
+    # ────────────────────────────────────────────────────────────────────────
+    - name: Post-build config verification
+      if: always()
+      shell: bash
+      run: |
+        CFG="${OUT_DIR}/.config"
+        [ -f "${CFG}" ] || { echo "No .config found"; exit 0; }
+
+        echo "╔══════════════════════════════════╗"
+        echo "║  POST-BUILD CONFIG VERIFICATION  ║"
+        echo "╚══════════════════════════════════╝"
+
+        echo ""; echo "--- LTO ---"
+        grep -E "^(CONFIG_LTO|# CONFIG_LTO)" "${CFG}" || echo "(none)"
+
+        echo ""; echo "--- KVM / VHE ---"
+        grep -E "KVM|VHE|VIRTUALIZATION" "${CFG}" || echo "(none)"
+
+        echo ""; echo "--- VirtIO ---"
+        grep -E "VIRTIO|VHOST" "${CFG}" || echo "(none)"
+
+        echo ""; echo "--- KernelSU / Kprobes ---"
+        grep -E "KPROBE|KALLSYMS" "${CFG}" || echo "(none)"
+
+        echo ""; echo "--- Gunyah / QCOM ---"
+        grep -E "GUNYAH|QCOM_SCM" "${CFG}" || echo "(none)"
+
+        echo ""; echo "--- CMDLINE ---"
+        grep "CONFIG_CMDLINE" "${CFG}" || echo "(none)"
+
+        echo ""; echo "--- LSM ---"
+        grep "CONFIG_LSM" "${CFG}" || echo "(none)"
+
+        echo ""; echo "--- KernelSU version ---"
+        grep "CONFIG_KSU" "${CFG}" || echo "(none)"
+
+    # ────────────────────────────────────────────────────────────────────────
+    # 10 · Package AnyKernel3 flashable zip
+    # ────────────────────────────────────────────────────────────────────────
+    - name: Package AnyKernel3 zip
+      if: success()
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        AK3_DIR="${GITHUB_WORKSPACE}/AnyKernel3"
+        git clone --depth=1 https://github.com/osm0sis/AnyKernel3 "${AK3_DIR}"
+
+        # Minimal anykernel.sh for SM-A057F
+        cat > "${AK3_DIR}/anykernel.sh" << 'AKEOF'
+# AnyKernel3 — SM-A057F / A05s
+properties() { '
+kernel.string=SM-A057F Custom Kernel + KernelSU
+do.devicecheck=1
+do.modules=1
+do.systemless=1
+do.cleanup=1
+do.cleanuponabort=0
+device.name1=a05s
+device.name2=SM-A057F
+supported.versions=13-15
+'; }
+
+block=/dev/block/bootdevice/by-name/boot;
+is_slot_device=0;
+ramdisk_compression=auto;
+patch_vbmeta_flag=auto;
+
+. tools/ak3-core.sh;
+. $AKHOME/patch.d/*;
+AKEOF
+
+        cp "${DIST_DIR}/Image" "${AK3_DIR}/Image"
+
+        ZIP_NAME="SM-A057F_KernelSU-${KSU_REF}_$(date +%Y%m%d-%H%M).zip"
+        cd "${AK3_DIR}"
+        zip -r9 "${GITHUB_WORKSPACE}/out/${ZIP_NAME}" . -x "*.git*" -x "README.md"
+
+        echo "ZIP_NAME=${ZIP_NAME}" >> "$GITHUB_ENV"
+        ls -lh "${GITHUB_WORKSPACE}/out/${ZIP_NAME}"
+
+    # ────────────────────────────────────────────────────────────────────────
+    # 11 · Collect all artifacts
+    # ────────────────────────────────────────────────────────────────────────
+    - name: Collect artifacts
+      if: always()
+      shell: bash
+      run: |
+        set +e
+        mkdir -p artifacts/dist artifacts/config
+
+        [ -d "${DIST_DIR}" ] && cp -r "${DIST_DIR}/." artifacts/dist/ 2>/dev/null || true
+
+        # Flashable zip
+        find "${GITHUB_WORKSPACE}/out" -maxdepth 1 -name "*.zip" \
+          -exec cp {} artifacts/ \; 2>/dev/null || true
+
+        # Final .config snapshot
+        [ -f "${OUT_DIR}/.config" ] && cp "${OUT_DIR}/.config" artifacts/config/final.config || true
+
+        echo "=== Artifact tree ==="
+        find artifacts -type f | sort
+
+    # ────────────────────────────────────────────────────────────────────────
+    # 12 · Upload artifacts
+    # ────────────────────────────────────────────────────────────────────────
+    - name: Upload artifacts
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: SM-A057F-kernel-KSU-${{ github.run_number }}
+        path: artifacts/**
+        if-no-files-found: warn
+        retention-days: 14
+        compression-level: 0
