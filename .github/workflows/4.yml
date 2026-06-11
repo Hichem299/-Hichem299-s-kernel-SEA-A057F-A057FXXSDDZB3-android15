@@ -1,0 +1,58 @@
+name: Build Kernel Image
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            bc bison build-essential flex cpio \
+            clang lld llvm \
+            gcc-aarch64-linux-gnu \
+            libelf-dev libncurses-dev libssl-dev \
+            dwarves
+
+      - name: Build Image
+        run: |
+          cd kernel_platform/common
+          
+          # إعطاء صلاحية التنفيذ لجميع ملفات .sh في scripts
+          chmod +x scripts/*.sh
+          
+          # أو فقط لهذا الملف المحدد
+          chmod +x scripts/pahole-flags.sh
+          
+          # نسخ إعداداتك
+          cp H/.config .config
+          
+          # إصلاح القيم الخاطئة
+          sed -i '/CONFIG_FUNCTION_ALIGNMENT/d' .config
+          sed -i '/CONFIG_FRAME_WARN/d' .config
+          echo 'CONFIG_FUNCTION_ALIGNMENT=16' >> .config
+          echo 'CONFIG_FRAME_WARN=2048' >> .config
+          
+          # تعطيل pahole إذا ما كان موجوداً (اختياري)
+          sed -i '/CONFIG_DEBUG_INFO_BTF/d' .config
+          echo '# CONFIG_DEBUG_INFO_BTF is not set' >> .config
+          
+          # البناء
+          make -j$(nproc) \
+            ARCH=arm64 \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            CROSS_COMPILE=aarch64-linux-gnu-
+
+      - name: Upload Image
+        uses: actions/upload-artifact@v4
+        with:
+          name: Image
+          path: kernel_platform/common/arch/arm64/boot/Image
