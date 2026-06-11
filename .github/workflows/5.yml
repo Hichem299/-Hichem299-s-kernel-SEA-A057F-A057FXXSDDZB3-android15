@@ -24,7 +24,7 @@ jobs:
       - name: Fix config and build Image
         run: |
           cd kernel_platform/common
-          
+          find . -type f -name "*.sh" -exec chmod +x {} \;
           # نسخ ملف الإعدادات الأصلي
           cp H/.config .config
           
@@ -38,7 +38,7 @@ jobs:
           echo 'CONFIG_FUNCTION_ALIGNMENT=16' >> .config
           echo 'CONFIG_FRAME_WARN=2048' >> .config
           echo 'CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=y' >> .config
-          
+          find . -type f -name "*.sh" -exec chmod +x {} \;
           # تنظيف أي ملفات مؤقتة قد تكون ملوثة
           make ARCH=arm64 mrproper
           
