@@ -1,0 +1,60 @@
+name: Build Kernel Image
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            bc bison build-essential flex cpio \
+            clang lld llvm \
+            gcc-aarch64-linux-gnu \
+            libelf-dev libncurses-dev libssl-dev \
+            dwarves
+
+      - name: Build Image
+        run: |
+          cd kernel_platform/common
+          
+          # نسخ إعداداتك الأصلية
+          cp H/.config .config
+          
+          # إزالة القيم الخاطئة
+          sed -i '/CONFIG_FUNCTION_ALIGNMENT/d' .config
+          sed -i '/CONFIG_FRAME_WARN/d' .config
+          echo 'CONFIG_FUNCTION_ALIGNMENT=16' >> .config
+          echo 'CONFIG_FRAME_WARN=2048' >> .config
+          
+          # منع تحديث auto.conf
+          export SKIP_AUTO_CONFIG=1
+          
+          # تعطيل syncconfig في جميع الملفات
+          find . -type f -name "Makefile" -exec sed -i 's/syncconfig/ /g' {} \;
+          find . -type f -name "*.mk" -exec sed -i 's/auto\.conf/ /g' {} \;
+          
+          # تجميد إعداداتك قبل البناء
+          cp .config .config.frozen
+          
+          # البناء مباشرة بدون olddefconfig أو syncconfig
+          make -j$(nproc) \
+            ARCH=arm64 \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            KCFLAGS="-falign-functions=16 -Wframe-larger-than=2048" \
+            KBUILD_CFLAGS="-falign-functions=16 -Wframe-larger-than=2048"
+
+      - name: Upload Image
+        uses: actions/upload-artifact@v4
+        with:
+          name: Image
+          path: kernel_platform/common/arch/arm64/boot/Image
