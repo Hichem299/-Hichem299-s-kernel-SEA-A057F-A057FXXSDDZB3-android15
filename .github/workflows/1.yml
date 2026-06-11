@@ -23,6 +23,7 @@ jobs:
 
       - name: Build Image
         run: |
+          cd kernel_platform/common
           cp H/.config .config
           find . -type f \( -name Makefile -o -name '*.mk' \) \
             -exec sed -i '/auto\.conf/d;/syncconfig/d;/autoconf\.h/d' {} +
