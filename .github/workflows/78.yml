@@ -1,0 +1,79 @@
+name: Build Kernel Image
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            bc bison build-essential flex cpio \
+            clang lld llvm \
+            gcc-aarch64-linux-gnu \
+            libelf-dev libncurses-dev libssl-dev \
+            dwarves
+
+      - name: Fix config and build Image
+        run: |
+          cd kernel_platform/common
+          find . -type f -name "*.sh" -exec chmod +x {} \;
+          # نسخ ملف الإعدادات الأصلي
+          cp H/.config .config
+          
+          # تنظيف كامل للمشاكل في ملف .config
+          sed -i '/CONFIG_FUNCTION_ALIGNMENT/d' .config
+          sed -i '/CONFIG_FRAME_WARN/d' .config
+          sed -i '/CONFIG_CC_OPTIMIZE_FOR_SIZE/d' .config
+          sed -i '/CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE/d' .config
+          
+          # إضافة القيم الصحيحة
+          echo 'CONFIG_FUNCTION_ALIGNMENT=16' >> .config
+          echo 'CONFIG_FRAME_WARN=2048' >> .config
+          echo 'CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=y' >> .config
+          
+          # تنظيف أي ملفات مؤقتة قد تكون ملوثة
+          make ARCH=arm64 mrproper
+          
+          # استعادة .config المعدل
+          cp H/.config .config
+          
+          # تطبيق التصحيحات على .config مرة أخرى
+          sed -i '/CONFIG_FUNCTION_ALIGNMENT/d' .config
+          sed -i '/CONFIG_FRAME_WARN/d' .config
+          echo 'CONFIG_FUNCTION_ALIGNMENT=16' >> .config
+          echo 'CONFIG_FRAME_WARN=2048' >> .config
+          
+          # حذف auto.conf نهائياً
+          rm -f include/config/auto.conf
+          rm -f include/config/auto.conf.cmd
+          
+          # إنشاء auto.conf فارغ ولن يتغير
+          mkdir -p include/config
+          echo '# manual config - do not regenerate' > include/config/auto.conf
+          chmod 444 include/config/auto.conf
+          
+          # إضافة منع للأخطاء في CFLAGS
+          export KCFLAGS="-falign-functions=16 -Wframe-larger-than=2048"
+          export CFLAGS_KERNEL="-falign-functions=16 -Wframe-larger-than=2048"
+          
+          # البناء
+          make -j$(nproc) \
+            ARCH=arm64 \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            KCFLAGS="-falign-functions=16 -Wframe-larger-than=2048"
+
+      - name: Upload Image
+        uses: actions/upload-artifact@v4
+        with:
+          name: Image
+          path: kernel_platform/common/arch/arm64/boot/Image
