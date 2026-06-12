@@ -30,7 +30,7 @@ jobs:
         working-directory: kernel_platform
         run: |
           chmod +x msm-kernel/scripts/config
-          msm-kernel/scripts/config \
+          msm-kernel/scripts/config/vendor \
             --file msm-kernel/arch/arm64/configs/m269_sec_defconfig \
             -e CONFIG_VIRTUALIZATION \
             -e CONFIG_KVM \
