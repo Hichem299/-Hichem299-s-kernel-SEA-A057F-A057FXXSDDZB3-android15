@@ -1,0 +1,102 @@
+name: Build Samsung A05s A057F Android 15 Kernel
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+
+    env:
+      KERNEL_ROOT: ${{ github.workspace }}/kernel_platform
+      DEFCONFIG: ${{ github.workspace }}/kernel_platform/msm-kernel/arch/arm64/configs/m269_sec_defconfig
+      BUILD_CONFIG: msm-kernel/build.config.msm.m269.sec
+      OUT_DIR: ${{ github.workspace }}/out
+      DIST_DIR: ${{ github.workspace }}/out/dist
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            bc bison build-essential ccache curl flex gawk git \
+            libelf-dev libssl-dev lld lz4 unzip zip zstd rsync \
+            dwarves device-tree-compiler python3 python3-pip
+
+      - name: Check required paths
+        shell: bash
+        run: |
+          echo "Checking required files..."
+          test -d "$KERNEL_ROOT"
+          test -f "$DEFCONFIG"
+          test -f "$KERNEL_ROOT/build/build.sh"
+          test -f "$KERNEL_ROOT/$BUILD_CONFIG"
+
+      - name: Apply kernel config overrides
+        shell: bash
+        run: |
+          append_if_missing() {
+            local line="$1"
+            grep -qxF "$line" "$DEFCONFIG" || echo "$line" >> "$DEFCONFIG"
+          }
+
+          # تفعيل خيارات KVM والمحاكاة الافتراضية
+          append_if_missing "CONFIG_VIRTUALIZATION=y"
+          append_if_missing "CONFIG_KVM=y"
+          append_if_missing "CONFIG_KVM_ARM_HOST=y"
+          append_if_missing "CONFIG_VIRTIO=y"
+          append_if_missing "CONFIG_VIRTIO_NET=y"
+          append_if_missing "CONFIG_VIRTIO_BLK=y"
+          append_if_missing "CONFIG_VHOST_NET=y"
+          append_if_missing "CONFIG_VSOCKETS=y"
+
+          echo "Last lines of defconfig:"
+          tail -n 20 "$DEFCONFIG"
+
+      - name: Build kernel
+        working-directory: ${{ github.workspace }}/kernel_platform
+        shell: bash
+        run: |
+          chmod +x build/build.sh
+          mkdir -p "$OUT_DIR" "$DIST_DIR"
+
+          BUILD_CONFIG="$BUILD_CONFIG" \
+          OUT_DIR="$OUT_DIR" \
+          DIST_DIR="$DIST_DIR" \
+          ./build/build.sh -j"$(nproc --all)"
+
+      - name: Verify output
+        shell: bash
+        run: |
+          ls -lah "$DIST_DIR"
+
+          if [ -f "$DIST_DIR/Image" ]; then
+            echo "✅ Found Image"
+          elif [ -f "$DIST_DIR/Image.lz4" ]; then
+            echo "✅ Found Image.lz4"
+          elif [ -f "$DIST_DIR/Image.lz4-dtb" ]; then
+            echo "✅ Found Image.lz4-dtb"
+          else
+            echo "❌ No kernel image found in $DIST_DIR"
+            exit 1
+          fi
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: A05s-A057F-Android15-kernel
+          if-no-files-found: error
+          path: |
+            ${{ env.DIST_DIR }}/Image
+            ${{ env.DIST_DIR }}/Image.lz4
+            ${{ env.DIST_DIR }}/Image.lz4-dtb
+            ${{ env.DIST_DIR }}/*.dtb
+            ${{ env.DIST_DIR }}/*.dtbo
+            ${{ env.DIST_DIR }}/*.img
