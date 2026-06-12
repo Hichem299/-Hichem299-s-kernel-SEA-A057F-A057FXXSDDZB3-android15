@@ -1,0 +1,77 @@
+name: Build Samsung A05s A057F Android 15 Kernel
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            bc bison build-essential ccache curl flex gawk git \
+            libelf-dev libssl-dev lld lz4 unzip zip zstd rsync \
+            dwarves device-tree-compiler python3 python3-pip
+
+      # ============================================================
+      # Kernel config overrides — أضف إعداداتك هنا
+      # ============================================================
+      - name: Apply kernel config overrides
+        working-directory: kernel_platform
+        run: |
+          msm-kernel/scripts/config \
+            --file msm-kernel/arch/arm64/configs/vendor/parrot_defconfig \
+            -e CONFIG_VIRTUALIZATION \
+            -e CONFIG_KVM \
+            -e CONFIG_KVM_ARM_HOST \
+            -e CONFIG_KVM_MMIO \
+            -e CONFIG_KVM_ARM_PMU \
+            -e CONFIG_VHOST \
+            -e CONFIG_VHOST_NET \
+            -e CONFIG_VHOST_VSOCK \
+            -e CONFIG_VSOCKETS \
+            -e CONFIG_VIRTIO \
+            -e CONFIG_VIRTIO_NET \
+            -e CONFIG_VIRTIO_BLK \
+            -e CONFIG_VIRTIO_MMIO \
+            -e CONFIG_VIRTIO_PCI
+      # ============================================================
+
+      - name: Build kernel
+        working-directory: kernel_platform
+        env:
+          BUILD_CONFIG: msm-kernel/build.config.msm.m269.sec
+          VARIANT: gki
+          OUT_DIR: ${{ github.workspace }}/out
+          DIST_DIR: ${{ github.workspace }}/out/dist
+        run: |
+          chmod +x build/build.sh
+          chmod +x build/brunch
+          ./build/build.sh -j"$(nproc --all)"
+
+      - name: Verify output
+        run: |
+          ls -lah out/dist
+          test -f out/dist/Image
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: A05s-A057F-Android15-kernel
+          if-no-files-found: warn
+          path: |
+            out/dist/Image
+            out/dist/*.dtb
+            out/dist/*.dtbo
+            out/dist/*.img
+            out/dist/.config
